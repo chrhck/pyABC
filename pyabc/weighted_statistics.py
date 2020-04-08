@@ -78,7 +78,7 @@ def effective_sample_size(weights):
     .. math::
         n_\\text{eff} = \\frac{(\\sum_{i=1}^nw_i)^2}{\\sum_{i=1}^nw_i^2}
     """
-    weights = np.array(weights)
+    weights = np.asarray(weights)
     n_eff = np.sum(weights)**2 / np.sum(weights**2)
     return n_eff
 

@@ -131,9 +131,15 @@ class ConstantPopulationSize(PopulationStrategy):
 
 class LocalClient(object):
 
-    def map(func, iterable):
+    def map(self, func, iterable, *args, **kwargs):
         return [func(i) for i in iterable]
 
+    def gather(self, futures):
+        return futures
+
+    def submit(self, func, args, **kwargs):
+        del kwargs["pure"]
+        return func(*args, **kwargs)
 
 class AdaptivePopulationSize(PopulationStrategy):
     """
@@ -185,13 +191,14 @@ class AdaptivePopulationSize(PopulationStrategy):
                  nr_samples_per_parameter: int = 1,
                  n_bootstrap: int = 10,
                  nr_calibration_particles: int = None,
-                 client= None):
+                 client=None):
         super().__init__(
             nr_calibration_particles=nr_calibration_particles,
             nr_samples_per_parameter=nr_samples_per_parameter)
 
         if client is None:
             client = LocalClient()
+            logger.info("Using LocalClient for CV")
         self.client = client
 
         self.start_nr_particles = start_nr_particles

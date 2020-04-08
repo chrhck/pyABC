@@ -3,7 +3,7 @@ from scipy import stats as st
 import copy
 
 
-def weights(n_per_model, transitions, test_transitions, test_X):
+def weights(n_per_model, transitions, test_transitions, test_X, client):
     """
     For each model m, sample `n_per_model[m]` points from `transitions[m]`,
     fit `test_transitions[m]` to them, and then compute the weights of all
@@ -32,13 +32,16 @@ def weights(n_per_model, transitions, test_transitions, test_X):
         Weights for each model at the test points
     """
     bootstr_w_at_test_X = []
-    for trans, test_trans, n, X in zip(transitions, test_transitions,
-                                       n_per_model, test_X):
+
+    def _func(trans, test_trans, n, X):
         bootstr_X = trans.rvs(size=n)
         test_trans.fit(bootstr_X, np.ones(len(bootstr_X)) / len(bootstr_X))
-        bootstr_w_at_test_X.append(test_trans.pdf(X))
-    return bootstr_w_at_test_X
+        return test_trans.pdf(X)
 
+    futures = [client.submit(_func, trans, test_trans, n, X, pure=False)
+               for trans, test_trans, n, X in
+               zip(transitions, test_transitions, n_per_model, test_X)]
+    return futures
 
 def calc_cv(nr_particles, model_weights, N_BOOTSTR, test_w,
                   transitions, test_X, client):
@@ -85,13 +88,14 @@ def calc_cv(nr_particles, model_weights, N_BOOTSTR, test_w,
     # N_BOOTSTR times, train test_transitions on n_per_model points, and
     # calculate the weights associated with test_X, for each model
 
-    bootstr_w_at_test_X = client.map(
-        lambda _: weights(n_per_model, transitions, test_transitions,
-                          test_X),
-        range(N_BOOTSTR))
-
-    # sort by model
-    per_model_w = [np.array(arr) for arr in zip(*bootstr_w_at_test_X)]
+    futures = []
+    for _ in range(N_BOOTSTR):
+        futures.append(
+            weights(n_per_model, transitions, test_transitions,
+                    test_X, client))
+                          
+    bootstr_w_at_test_X = client.gather(futures)
+    per_model_w = [np.asarray(arr) for arr in zip(*bootstr_w_at_test_X)]
 
     # calculate the cv of the bootstrapped weights for each model
     variations_at_X = [st.variation(ws, axis=0) for ws in per_model_w]
