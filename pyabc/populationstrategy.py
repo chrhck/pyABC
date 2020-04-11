@@ -9,17 +9,24 @@ of the generations.
 """
 
 from abc import ABC, abstractmethod
+import copy
 import json
 import logging
 import numpy as np
 from typing import Dict, List, Union
 import warnings
+from memory_profiler import profile
+from dask.distributed import Client, LocalCluster
+import dask.array as da
+from pyabc.cv.bootstrap import calc_cv, calc_variation
+from pyabc.cv.powerlaw import fitpowerlaw
+from tlz import partition_all
 
-from pyabc.cv.bootstrap import calc_cv
 from .transition import Transition
-from .transition.predict_population_size import predict_population_size
+from collections import namedtuple
 
 logger = logging.getLogger("Adaptation")
+CVEstimate = namedtuple("CVEstimate", "n_estimated n_samples_list cvs f popt")
 
 
 class PopulationStrategy(ABC):
@@ -129,17 +136,6 @@ class ConstantPopulationSize(PopulationStrategy):
         return config
 
 
-class LocalClient(object):
-
-    def map(self, func, iterable, *args, **kwargs):
-        return [func(i) for i in iterable]
-
-    def gather(self, futures):
-        return futures
-
-    def submit(self, func, args, **kwargs):
-        del kwargs["pure"]
-        return func(*args, **kwargs)
 
 class AdaptivePopulationSize(PopulationStrategy):
     """
@@ -197,9 +193,10 @@ class AdaptivePopulationSize(PopulationStrategy):
             nr_samples_per_parameter=nr_samples_per_parameter)
 
         if client is None:
-            client = LocalClient()
-            logger.info("Using LocalClient for CV")
-        self.client = client
+            logger.info("Using local client")
+            cluster = LocalCluster(n_workers=1)
+            client = Client(cluster)
+        self.client = client 
 
         self.start_nr_particles = start_nr_particles
         self.max_population_size = max_population_size
@@ -221,18 +218,11 @@ class AdaptivePopulationSize(PopulationStrategy):
 
     def update(self, transitions: List[Transition],
                model_weights: np.ndarray, t: int = None):
-        test_X = [trans.X for trans in transitions]
-        test_w = [trans.w for trans in transitions]
+
+        cv_estimate = self.predict_population_size(
+            model_weights, transitions)
 
         reference_nr_part = self.nr_particles
-        target_cv = self.mean_cv
-        cv_estimate = predict_population_size(
-            reference_nr_part, target_cv,
-            lambda nr_particles: calc_cv(nr_particles, model_weights,
-                                         self.n_bootstrap, test_w, transitions,
-                                         test_X,
-                                         self.client)[0])
-
         if not np.isnan(cv_estimate.n_estimated):
             self.nr_particles = max(min(int(cv_estimate.n_estimated),
                                         self.max_population_size),
@@ -246,6 +236,127 @@ class AdaptivePopulationSize(PopulationStrategy):
             return self.nr_calibration_particles
         return self.nr_particles
 
+
+
+    # @profile
+    def predict_population_size(
+            self,
+            model_weights,
+            transitions,
+            n_steps=10,
+            first_step_factor=3) -> CVEstimate:
+        """
+        Estimate the required nr of particles for a target coefficient of
+        variation
+
+        Parameters
+        ----------
+
+        TODO
+
+
+        n_steps: int
+            The number of steps
+
+        first_step_factor: float
+            Factor by which to divide the current population size, to give the
+            lower bound for the next population size.
+
+        Returns
+        -------
+
+        suggested_pop_size: int
+        """
+        test_Xs = [trans.X for trans in transitions]
+
+        # n_models in first dimension
+        test_w = np.vstack([trans.w for trans in transitions])
+        
+        current_pop_size = self.nr_particles
+        target_cv = self.mean_cv
+
+        if current_pop_size == 1:
+            return CVEstimate(1, [], [], None, None)
+
+        start = max(current_pop_size // first_step_factor, 1)
+        stop = current_pop_size * 2
+        step = max(current_pop_size // n_steps, 1)
+
+        n_samples_list = list(range(start, stop, step))
+        
+        
+        per_model_weights = []
+        
+
+        n_samples_futures = [] 
+        n_per_models = []
+        cvs = []
+
+
+        br_size = test_Xs[0].shape[0] * test_Xs[0].shape[1] * stop * 64 / 1000 / 1000
+        target_size = 100 # MiB
+
+        n_chunks = int(np.ceil(br_size / target_size))
+        chunk_size = int(np.ceil(test_Xs[0].shape[0] / n_chunks))
+        print("Chunk size: ", chunk_size)
+        test_X_arrs = [da.from_array(
+            test_X.values, chunks=(chunk_size, test_X.shape[1])) for test_X in test_Xs]
+        
+        # test_X_arrs = self.client.scatter(
+        #     test_X_arrs)
+        
+        test_transitions_settings = [
+            (tr.bandwidth_selector, tr.scaling) for tr in transitions]
+        
+        for i, ns in enumerate(n_samples_list):
+            n_per_model = np.random.multinomial(ns, model_weights)
+            n_per_models.append(n_per_model)
+            model_futures = []
+            for j, (n, transition, test_X) in enumerate(zip(
+                    n_per_model, transitions, test_X_arrs)):
+                # test_X = self.client.scatter(test_X, broadcast=True)
+                bootstrap_futures = []
+                
+                for _ in range(self.n_bootstrap):
+                    
+                    bootstr_X = transition.rvs(size=n).values
+                    weights_init = np.ones(len(bootstr_X)) / len(bootstr_X)
+                    cov = transition.fit_cov(
+                        bootstr_X,
+                        weights_init
+                        )
+                    bootstrap = da.map_blocks(
+                        transition.pdf_static,
+                        test_X,
+                        bootstr_X,
+                        cov,
+                        weights_init,
+                        drop_axis=1,
+                        dtype=float)
+                    bootstrap = self.client.compute(bootstrap) 
+                    bootstrap_futures.append(bootstrap)
+                bootstrap_futures = self.client.gather(bootstrap_futures)
+                model_futures.append(bootstrap_futures)
+
+            cv = calc_variation(
+                    model_futures,
+                    n_per_model,
+                    test_w)
+                    
+            cvs.append(cv)
+                
+        # cvs_array = da.stack(cvs)
+        # cvs = cvs_array.compute()
+                    
+        try:
+            popt, f, finv = fitpowerlaw(n_samples_list, cvs)
+            suggested_pop_size = finv(target_cv)
+            return CVEstimate(suggested_pop_size, n_samples_list, cvs, f, popt)
+        except RuntimeError:
+            logger.warning("Power law fit failed. "
+                           "Falling back to current nr particles {}"
+                           .format(current_pop_size))
+            return CVEstimate(current_pop_size, n_samples_list, cvs, None, None)
 
 class ListPopulationSize(PopulationStrategy):
     """

@@ -158,7 +158,8 @@ class ABCSMC:
                  sampler: Sampler = None,
                  acceptor: Acceptor = None,
                  stop_if_only_single_model_alive: bool = False,
-                 max_nr_recorded_particles: int = np.inf):
+                 max_nr_recorded_particles: int = np.inf,
+                 client=None):
 
         if not isinstance(models, list):
             models = [models]
@@ -224,6 +225,7 @@ class ABCSMC:
         self.max_nr_populations = None
         self.min_acceptance_rate = None
 
+        self.client = client
         self._sanity_check()
 
     def _sanity_check(self):

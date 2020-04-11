@@ -1,7 +1,10 @@
+from time import time
+import logging
 import numpy as np
 import cloudpickle as pickle
 from sortedcontainers import SortedListWithKey
 
+logger = logging.getLogger(__name__)
 
 class EPSMixin:
     def full_submit_function_pickle(self, job_id):
@@ -37,6 +40,8 @@ class EPSMixin:
         all_results = SortedListWithKey(key=lambda x: x[0])
         next_valid_index = -1
 
+        tstamp = time()
+        num_accepted_dt = 0
         # Main Loop, leave once we have enough material
         while True:
             # Gather finished jobs
@@ -57,6 +62,17 @@ class EPSMixin:
                                                  remote_result))
                         if remote_accept:
                             num_accepted_total += 1
+                        num_accepted_dt += 1
+            if time()-tstamp > 60:
+                tstamp = time()
+                dsamples = num_accepted_dt
+                if self.client_cores() > 0:
+                    smp_cr_s = dsamples / 60 / self.client_cores()
+                else:
+                    smp_cr_s = 0
+                logger.info("{} samples /s ({:.3f} samples / core /s) in the last 60s".format(
+                    dsamples / 60,  smp_cr_s))
+                num_accepted_dt = 0
 
             if len(unprocessed_results) > 0:
                 next_index = unprocessed_results[0][0]
@@ -86,12 +102,10 @@ class EPSMixin:
             # Number of jobs open < self.scheduler_workers_running *
             # worker_load_factor
             # num_accepted_total < jobs required
-            if (len(running_jobs) < self.client_max_jobs) and \
-                    (len(running_jobs) < self.client_cores()) and \
-                    (num_accepted_total < n):
-                for _ in range(0,
-                               np.minimum(self.client_max_jobs,
-                                          self.client_cores()).astype(int)
+            if ((len(running_jobs) < self.client_max_jobs) and 
+                     # (len(running_jobs) < self.client_cores()) and \
+                    (num_accepted_total < n)):
+                for _ in range(0, int(self.client_max_jobs)
                                - len(running_jobs)):
                     job_id_batch = []
                     for i in range(self.batch_size):

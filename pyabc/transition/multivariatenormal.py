@@ -1,4 +1,7 @@
 from typing import Union
+import logging
+
+logger = logging.getLogger(__name__)
 
 import numpy as np
 import pandas as pd
@@ -34,6 +37,8 @@ def silverman_rule_of_thumb(n_samples, dimension):
     return (4 / n_samples / (dimension + 2)) ** (1 / (dimension + 4))
 
 
+
+
 class MultivariateNormalTransition(Transition):
     """
     Transition via a multivariate Gaussian KDE estimate.
@@ -54,19 +59,29 @@ class MultivariateNormalTransition(Transition):
         a float and dimension is the parameter dimension.
 
     """
-    def __init__(self, scaling=1, bandwidth_selector=silverman_rule_of_thumb):
+    def __init__(self, scaling=1, bandwidth_selector=silverman_rule_of_thumb,
+                 ):
         self.scaling = scaling
         self.bandwidth_selector = bandwidth_selector
 
-    def fit(self, X: pd.DataFrame, w: np.ndarray):
-        if len(X) == 0:
-            raise NotEnoughParticles("Fitting not possible.")
-        self._X_arr = X.values
-        sample_cov = smart_cov(self._X_arr, w)
+    def fit_cov(self, x, w):
+
+        sample_cov = smart_cov(x, w)
         dim = sample_cov.shape[0]
         eff_sample_size = 1 / (w**2).sum()
         bw_factor = self.bandwidth_selector(eff_sample_size, dim)
-        self.cov = sample_cov * bw_factor**2 * self.scaling
+        return sample_cov * bw_factor**2 * self.scaling
+    
+    def fit(self, X: pd.DataFrame, w: np.ndarray):
+        if len(X) == 0:
+            raise NotEnoughParticles("Fitting not possible.")
+        if isinstance(X, pd.DataFrame):
+            self._X_arr = X.values
+        else:
+            self._X_arr = X
+
+        cov = self.fit_cov(self._X_arr, w)
+        self.cov = cov
         self.normal = st.multivariate_normal(cov=self.cov, allow_singular=True)
 
     def rvs(self, size=None):
@@ -85,12 +100,25 @@ class MultivariateNormalTransition(Transition):
         return perturbed
 
     def pdf(self, x: Union[pd.Series, pd.DataFrame]):
-        x = x[self.X.columns]
-        x = np.atleast_3d(x.values)
+        if isinstance(x, (pd.Series, pd.DataFrame)):
+            x = x[self.X.columns]
+            x = x.values
+        x = np.atleast_3d(x)
+
+        return self.pdf_static(
+            x,
+            self._X_arr,
+            self.cov,
+            self.w)
+
+    @staticmethod
+    def pdf_static(x, mean, cov, weights):
+        x = np.atleast_3d(x)
+
         dens = (
-            self.normal.pdf(
-                np.swapaxes(x-self._X_arr.T, 1,2))
-                * self.w)
+            st.multivariate_normal(cov=cov, allow_singular=True).pdf(
+                np.swapaxes(x-mean.T, 1,2))
+                * weights)
         dens = np.atleast_2d(dens).sum(axis=1).squeeze()
         if dens.size == 1:
             return dens.item()

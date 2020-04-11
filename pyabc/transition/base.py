@@ -5,8 +5,6 @@ import numpy as np
 import pandas as pd
 from sklearn.base import BaseEstimator
 from .exceptions import NotEnoughParticles
-from .predict_population_size import predict_population_size
-from ..cv.bootstrap import calc_cv
 from .transitionmeta import TransitionMeta
 
 logger = logging.getLogger("Transitions")
@@ -118,66 +116,6 @@ class Transition(BaseEstimator, metaclass=TransitionMeta):
 
     def no_meaningful_particles(self) -> bool:
         return len(self.X) == 0 or self.no_parameters
-
-    def mean_cv(self, n_samples: Union[None, int] = None) \
-            -> float:
-        """
-        Estimate the uncertainty on the KDE.
-
-        Parameters
-        ----------
-        n_samples: int, optional
-            Estimate the CV for ``n_samples`` samples.
-            If this parameter is not given, the sample size of the last fit
-            is used.
-
-        Returns
-        -------
-
-        mean_cv: float
-            The estimated average coefficient of variation.
-
-        Note
-        ----
-
-        A call to this method, as a side effect, also sets the attributes
-        ``test_points_``, ``test_weights_`` and ``variation_at_test_points_``.
-        These are the individual points, weights and variations
-        used to calculate the mean.
-        """
-        # TODO: not sure if this is the right behaviour
-        if self.no_meaningful_particles():
-            raise NotEnoughParticles(n_samples)
-
-        if n_samples is None:
-            n_samples = len(self.X)
-
-        test_points = self.X
-        test_weights = self.w
-
-        self.test_points_ = test_points
-        self.test_weights_ = test_weights
-
-        # calculate bootstrapped coefficients of variation
-        cv, variation_at_test = calc_cv(n_samples, np.array([1]),
-                                        self.NR_BOOTSTRAP, test_weights,
-                                        [self], [test_points])
-
-        self.variation_at_test_points_ = variation_at_test[0]
-
-        # return the cv as estimator of the uncertainty of sampling
-        # `n_samples` times from the KDE
-        return cv
-
-    def required_nr_samples(self, coefficient_of_variation: float) -> int:
-        if self.no_meaningful_particles():
-            raise NotEnoughParticles
-
-        res = predict_population_size(len(self.X), coefficient_of_variation,
-                                      self.mean_cv)
-        self.cv_estimate_ = res
-        return res.n_estimated
-
 
 class DiscreteTransition(Transition):
     """
